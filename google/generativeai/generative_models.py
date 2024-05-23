@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-import dataclasses
 import textwrap
 from typing import Any
-from typing import Union
 import reprlib
 
 # pylint: disable=bad-continuation, line-too-long
@@ -129,9 +127,6 @@ class GenerativeModel:
         tool_config: content_types.ToolConfigType | None,
     ) -> glm.GenerateContentRequest:
         """Creates a `glm.GenerateContentRequest` from raw inputs."""
-        if not contents:
-            raise TypeError("contents must not be empty")
-
         tools_lib = self._get_tools_lib(tools)
         if tools_lib is not None:
             tools_lib = tools_lib.to_proto()
@@ -235,6 +230,9 @@ class GenerativeModel:
             tools: `glm.Tools` more info coming soon.
             request_options: Options for the request.
         """
+        if not contents:
+            raise TypeError("contents must not be empty")
+
         request = self._prepare_request(
             contents=contents,
             generation_config=generation_config,
@@ -265,8 +263,8 @@ class GenerativeModel:
         except google.api_core.exceptions.InvalidArgument as e:
             if e.message.startswith("Request payload size exceeds the limit:"):
                 e.message += (
-                    " Please upload your files with the File API instead."
-                    "`f = genai.upload_file(path); m.generate_content(['tell me about this file:', f])`"
+                    " The file size is too large. Please use the File API to upload your files instead. "
+                    "Example: `f = genai.upload_file(path); m.generate_content(['tell me about this file:', f])`"
                 )
             raise
 
@@ -282,6 +280,9 @@ class GenerativeModel:
         request_options: helper_types.RequestOptionsType | None = None,
     ) -> generation_types.AsyncGenerateContentResponse:
         """The async version of `GenerativeModel.generate_content`."""
+        if not contents:
+            raise TypeError("contents must not be empty")
+
         request = self._prepare_request(
             contents=contents,
             generation_config=generation_config,
@@ -312,8 +313,8 @@ class GenerativeModel:
         except google.api_core.exceptions.InvalidArgument as e:
             if e.message.startswith("Request payload size exceeds the limit:"):
                 e.message += (
-                    " Please upload your files with the File API instead."
-                    "`f = genai.upload_file(path); m.generate_content(['tell me about this file:', f])`"
+                    " The file size is too large. Please use the File API to upload your files instead. "
+                    "Example: `f = genai.upload_file(path); m.generate_content(['tell me about this file:', f])`"
                 )
             raise
 
@@ -390,7 +391,9 @@ class GenerativeModel:
             history: An iterable of `glm.Content` objects, or equivalents to initialize the session.
         """
         if self._generation_config.get("candidate_count", 1) > 1:
-            raise ValueError("Can't chat with `candidate_count > 1`")
+            raise ValueError(
+                "Invalid configuration: The chat functionality does not support `candidate_count` greater than 1."
+            )
         return ChatSession(
             model=self,
             history=history,
@@ -441,6 +444,7 @@ class ChatSession:
         stream: bool = False,
         tools: content_types.FunctionLibraryType | None = None,
         tool_config: content_types.ToolConfigType | None = None,
+        request_options: helper_types.RequestOptionsType | None = None,
     ) -> generation_types.GenerateContentResponse:
         """Sends the conversation history with the added message and returns the model's response.
 
@@ -473,10 +477,12 @@ class ChatSession:
              safety_settings: Overrides for the model's safety settings.
              stream: If True, yield response chunks as they are generated.
         """
+        if request_options is None:
+            request_options = {}
+
         if self.enable_automatic_function_calling and stream:
             raise NotImplementedError(
-                "The `google.generativeai` SDK does not yet support `stream=True` with "
-                "`enable_automatic_function_calling=True`"
+                "Unsupported configuration: The `google.generativeai` SDK currently does not support the combination of `stream=True` and `enable_automatic_function_calling=True`."
             )
 
         tools_lib = self.model._get_tools_lib(tools)
@@ -491,7 +497,9 @@ class ChatSession:
 
         generation_config = generation_types.to_generation_config_dict(generation_config)
         if generation_config.get("candidate_count", 1) > 1:
-            raise ValueError("Can't chat with `candidate_count > 1`")
+            raise ValueError(
+                "Invalid configuration: The chat functionality does not support `candidate_count` greater than 1."
+            )
 
         response = self.model.generate_content(
             contents=history,
@@ -500,6 +508,7 @@ class ChatSession:
             stream=stream,
             tools=tools_lib,
             tool_config=tool_config,
+            request_options=request_options,
         )
 
         self._check_response(response=response, stream=stream)
@@ -512,6 +521,7 @@ class ChatSession:
                 safety_settings=safety_settings,
                 stream=stream,
                 tools_lib=tools_lib,
+                request_options=request_options,
             )
 
         self._last_sent = content
@@ -535,14 +545,22 @@ class ChatSession:
         candidates = response.candidates
         if len(candidates) != 1:
             raise ValueError(
-                f"Automatic function calling only works with 1 candidate, got: {len(candidates)}"
+                f"Invalid number of candidates: Automatic function calling only works with 1 candidate, but {len(candidates)} were provided."
             )
         parts = candidates[0].content.parts
         function_calls = [part.function_call for part in parts if part and "function_call" in part]
         return function_calls
 
     def _handle_afc(
-        self, *, response, history, generation_config, safety_settings, stream, tools_lib
+        self,
+        *,
+        response,
+        history,
+        generation_config,
+        safety_settings,
+        stream,
+        tools_lib,
+        request_options,
     ) -> tuple[list[glm.Content], glm.Content, generation_types.BaseGenerateContentResponse]:
 
         while function_calls := self._get_function_calls(response):
@@ -554,8 +572,8 @@ class ChatSession:
             for fc in function_calls:
                 fr = tools_lib(fc)
                 assert fr is not None, (
-                    "This should never happen, it should only return None if the declaration"
-                    "is not callable, and that's guarded against above."
+                    "Unexpected state: The function reference (fr) should never be None. It should only return None if the declaration "
+                    "is not callable, which is checked earlier in the code."
                 )
                 function_response_parts.append(fr)
 
@@ -568,6 +586,7 @@ class ChatSession:
                 safety_settings=safety_settings,
                 stream=stream,
                 tools=tools_lib,
+                request_options=request_options,
             )
 
             self._check_response(response=response, stream=stream)
@@ -584,12 +603,15 @@ class ChatSession:
         stream: bool = False,
         tools: content_types.FunctionLibraryType | None = None,
         tool_config: content_types.ToolConfigType | None = None,
+        request_options: helper_types.RequestOptionsType | None = None,
     ) -> generation_types.AsyncGenerateContentResponse:
         """The async version of `ChatSession.send_message`."""
+        if request_options is None:
+            request_options = {}
+
         if self.enable_automatic_function_calling and stream:
             raise NotImplementedError(
-                "The `google.generativeai` SDK does not yet support `stream=True` with "
-                "`enable_automatic_function_calling=True`"
+                "Unsupported configuration: The `google.generativeai` SDK currently does not support the combination of `stream=True` and `enable_automatic_function_calling=True`."
             )
 
         tools_lib = self.model._get_tools_lib(tools)
@@ -604,7 +626,9 @@ class ChatSession:
 
         generation_config = generation_types.to_generation_config_dict(generation_config)
         if generation_config.get("candidate_count", 1) > 1:
-            raise ValueError("Can't chat with `candidate_count > 1`")
+            raise ValueError(
+                "Invalid configuration: The chat functionality does not support `candidate_count` greater than 1."
+            )
 
         response = await self.model.generate_content_async(
             contents=history,
@@ -613,6 +637,7 @@ class ChatSession:
             stream=stream,
             tools=tools_lib,
             tool_config=tool_config,
+            request_options=request_options,
         )
 
         self._check_response(response=response, stream=stream)
@@ -625,6 +650,7 @@ class ChatSession:
                 safety_settings=safety_settings,
                 stream=stream,
                 tools_lib=tools_lib,
+                request_options=request_options,
             )
 
         self._last_sent = content
@@ -633,7 +659,15 @@ class ChatSession:
         return response
 
     async def _handle_afc_async(
-        self, *, response, history, generation_config, safety_settings, stream, tools_lib
+        self,
+        *,
+        response,
+        history,
+        generation_config,
+        safety_settings,
+        stream,
+        tools_lib,
+        request_options,
     ) -> tuple[list[glm.Content], glm.Content, generation_types.BaseGenerateContentResponse]:
 
         while function_calls := self._get_function_calls(response):
@@ -645,8 +679,8 @@ class ChatSession:
             for fc in function_calls:
                 fr = tools_lib(fc)
                 assert fr is not None, (
-                    "This should never happen, it should only return None if the declaration"
-                    "is not callable, and that's guarded against above."
+                    "Unexpected state: The function reference (fr) should never be None. It should only return None if the declaration "
+                    "is not callable, which is checked earlier in the code."
                 )
                 function_response_parts.append(fr)
 
@@ -659,6 +693,7 @@ class ChatSession:
                 safety_settings=safety_settings,
                 stream=stream,
                 tools=tools_lib,
+                request_options=request_options,
             )
 
             self._check_response(response=response, stream=stream)
@@ -706,13 +741,11 @@ class ChatSession:
 
         if last._error is not None:
             raise generation_types.BrokenResponseError(
-                "Can not build a coherent chat history after a broken "
-                "streaming response "
-                "(See the previous Exception fro details). "
-                "To inspect the last response object, use `chat.last`."
-                "To remove the last request/response `Content` objects from the chat "
-                "call `last_send, last_received = chat.rewind()` and continue "
-                "without it."
+                "Unable to build a coherent chat history due to a broken streaming response. "
+                "Refer to the previous exception for details. "
+                "To inspect the last response object, use `chat.last`. "
+                "To remove the last request/response `Content` objects from the chat, "
+                "call `last_send, last_received = chat.rewind()` and continue without it."
             ) from last._error
 
         sent = self._last_sent
